@@ -288,24 +288,8 @@ class Sphere(ManipulationEnv):
         # Compute the left-most point (assuming positive x is right)
         target_pos = sphere_center + np.array([-sphere_radius, 0, 0])
         target_pos = sphere_center
-        # Define a desired tangent orientation.
-        # Here, we form a desired 4x4 homogeneous transformation.
-        # (You should replace with the specific orientation your task requires.)
-        lhand_id = self.sim.model.body_name2id('gripper0_left_eef')
-        R_wd_lhand = self.sim.data.body_xmat[lhand_id].reshape(3, 3)
-        R_desired = R_wd_lhand  # placeholder: identity rotation
-        
-        body_names = ['world', 'table', 'left_eef_target', 'right_eef_target', 'robot0_base', 'mobilebase0_base', 'mobilebase0_fixed_support', 'mobilebase0_support', 'robot0_vention_upper_body', 'robot0_right_arm_fixed_base_link', 'robot0_right_shoulder_link', 'robot0_right_HalfArm1_Link', 'robot0_right_HalfArm2_Link', 'robot0_right_forearm_link', 'robot0_right_SphericalWrist1_Link', 'robot0_right_SphericalWrist2_Link', 'robot0_right_Bracelet_Link', 'robot0_right_hand', 'gripper0_right_robotiq_85_adapter_link', 'gripper0_right_eef', 'gripper0_right_left_outer_knuckle', 'gripper0_right_left_inner_finger', 'gripper0_right_left_inner_knuckle', 'gripper0_right_right_outer_knuckle', 'gripper0_right_right_inner_finger', 'gripper0_right_right_inner_knuckle', 'robot0_left_arm_fixed_base_link', 'robot0_left_shoulder_link', 'robot0_left_HalfArm1_Link', 'robot0_left_HalfArm2_Link', 'robot0_left_forearm_link', 'robot0_left_SphericalWrist1_Link', 'robot0_left_SphericalWrist2_Link', 'robot0_left_Bracelet_Link', 'robot0_left_hand', 'gripper0_left_robotiq_85_adapter_link', 'gripper0_left_eef', 'gripper0_left_left_outer_knuckle', 'gripper0_left_left_inner_finger', 'gripper0_left_left_inner_knuckle', 'gripper0_left_right_outer_knuckle', 'gripper0_left_right_inner_finger', 'gripper0_left_right_inner_knuckle', 'mobilebase0_wheeled_base', 'sphere_main']
-        for name in body_names:
-            body_id = self.sim.model.body_name2id(name)
-            p_wd = self.sim.data.body_xpos[body_id]
-            R_wd = self.sim.data.body_xmat[body_id].reshape(3, 3)
-            print(f"Body: {name}, Position: {p_wd}, Rotation:\n{R_wd}")
 
-        T_wd_target = np.eye(4)
-        T_wd_target[:3, :3] = R_desired
-        T_wd_target[:3, 3] = target_pos
-        
+        # GET T_wd_base
         lbase_id = self.sim.model.body_name2id('robot0_left_arm_fixed_base_link')
         p_wd_lbase = self.sim.data.body_xpos[lbase_id]
         R_wd_lbase = self.sim.data.body_xmat[lbase_id].reshape(3, 3)
@@ -315,30 +299,37 @@ class Sphere(ManipulationEnv):
         T_wd_lbase[:3, :3] = R_wd_lbase
         T_wd_lbase[:3, 3] = p_wd_lbase
         
-        print("T_wd_lbase:\n", T_wd_lbase)
-        print("T_wd_target:\n", T_wd_target)
-        # to get R_lbase_target in lbase frame, we need to do the following:
-        R_lbase_lhand_in_wd = R_wd_lbase.T @ R_wd_lhand
-        R_lbase_lhand = R_wd_lbase.T @ R_lbase_lhand_in_wd @ R_wd_lbase
-        print("R_lbase_lhand:\n", R_lbase_lhand)
-        T_lbase_target = np.linalg.inv(T_wd_lbase) @ T_wd_target # original
-        # T_lbase_target = np.linalg.inv(T_wd_target) @ T_wd_lbase # reverse
-        print("T_lbase_target:\n", T_lbase_target)
+        # GET T_wd_target
+        lhand_id = self.sim.model.body_name2id('robot0_left_end_effector')
+        R_wd_target = self.sim.data.body_xmat[lhand_id].reshape(3, 3)
+        p_wd_target = data.xpos[lhand_id]
 
+        T_wd_target = np.eye(4)
+        T_wd_target[:3, :3] = R_wd_target
+        T_wd_target[:3, 3] = p_wd_target
+        T_wd_target[:3, 3] = left_hand_pos + np.array([-0.2, 0, 0])
+
+        T_lbase_target = np.linalg.inv(T_wd_lbase) @ T_wd_target
 
         # Path to the robot's URDF (update with your actual URDF file)
         urdf_path = "robosuite/models/assets/robots/dual_kinova3/leonardo.urdf"
         # Name of the left end-effector frame (adjust as needed)
+        
         # Initial configuration for the left arm (using full robot qpos; adjust joint indices)
         # q0 = self.robots[0].init_qpos.copy()
         lq0 = self.sim.data.qpos[self.robots[0]._ref_joint_pos_indexes[7:14]]
 
-        # Compute IK for the left arm using Pinocchio.
+        # Name of the left end-effector frame
         left_ee = "end_effector"
+
+        # Compute the inverse kinematics solution using Pinnocchio
         q_sol = compute_ik(urdf_path, left_ee, T_lbase_target, lq0)
-        
+        print("initial qpos:", lq0)
+        print("IK solution:", q_sol)
+        print("", q_sol == lq0)
+
+        # Set left arm joints angles which are indexed from 7 to 14.
         desired_arm_pos = self.robots[0].init_qpos.copy()
-        # Assuming left arm joints are indexed from 7 to 14.
         desired_arm_pos[7:14] = q_sol
         
         return desired_arm_pos
@@ -368,7 +359,7 @@ class TimeKeeper:
 
 if __name__ == "__main__":
 
-    simulation_time = 10.0 # seconds
+    simulation_time = 100.0 # seconds
     env_step_size = 0.0001 # seconds
     horizon = int(simulation_time / env_step_size)
     # Create environment
@@ -514,9 +505,9 @@ if __name__ == "__main__":
                 times.append(data.time)
                 forces.append(total_force)  # This now includes the spike
                 
-                # Viewer updates (unchanged)
-                with viewer.lock():
-                    viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = 1
+                # # Viewer updates (unchanged)
+                # with viewer.lock():
+                #     viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = 1
 
                 viewer.sync()
                 time_keeper.consume_step()

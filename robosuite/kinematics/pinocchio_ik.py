@@ -3,20 +3,6 @@ import numpy as np
 np.set_printoptions(precision=4, suppress=True, threshold=1e-4)
 from numpy.linalg import norm, solve
 
-def clean_and_print_matrix(matrix, threshold=1e-4):
-    """Clean small values from matrix and return string representation"""
-    if isinstance(matrix, pin.SE3):
-        # Convert SE3 to 4x4 numpy array 
-        matrix_array = np.eye(4)
-        matrix_array[:3,:3] = matrix.rotation
-        matrix_array[:3,3] = matrix.translation
-    else:
-        matrix_array = np.array(matrix)
-        
-    matrix_clean = matrix_array.copy()
-    matrix_clean[np.abs(matrix_clean) < threshold] = 0
-    return matrix_clean
-
 def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
     """
     Compute inverse kinematics using Pinocchio.
@@ -33,77 +19,29 @@ def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
     Returns:
         np.ndarray: Joint configuration achieving target_pose.
     """
-# model = pin.buildModelFromUrdf(urdf_path)
-    # data = model.createData()
-    # # Use the default Pinocchio solver (e.g., Levenberg-Marquardt) as a placeholder
-    # q = q0.copy()
-    # q_pin = standard_to_pinocchio(model, q)
-    # for _ in range(max_iter):
-    #     pin.forwardKinematics(model, data, q_pin)
-    #     pin.updateFramePlacements(model, data)
-    #     current_pose = data.oMf[model.getFrameId(ee_frame)]
-    #     error_mat = pin.log(current_pose.inverse() * pin.SE3(target_pose[:3,:3], target_pose[:3,3]))
-    #     err = np.linalg.norm(error_mat)
-    #     if err < tol:
-    #         break
-    #     # Compute Jacobian
-    #     J = pin.computeFrameJacobian(model, data, q_pin, model.getFrameId(ee_frame))
-    #     dq = np.linalg.lstsq(J, error_mat, rcond=None)[0]
-    #     q += dq
-    # return q
 
     oMdes = pin.SE3(target_pose[:3,:3], target_pose[:3,3])
     print("oMdes: \n", clean_and_print_matrix(oMdes))
 
     model = pin.buildModelFromUrdf(urdf_path)
-    data = model.createData()
+    data = model.createData()# model = pin.buildModelFromUrdf(urdf_path)
 
     # Use the default Pinocchio solver (e.g., Levenberg-Marquardt) as a placeholder
     tool_frame_id = model.getFrameId(ee_frame)
-    # joint_id = model.frames[tool_frame_id].parent
-    joint_id = 7
     q = q0.copy()
     q_pin = standard_to_pinocchio(model, q)
     
     pin.forwardKinematics(model,data,q_pin)
 
+    # iterate through the transformation matricies of all frame ids
     # for i in range(0, len(model.frames)):
     #     pin.updateFramePlacement(model, data, i)
     #     oMact = data.oMf[i]
-    #     print( "i:", i, "\noMact: \n", clean_and_print_matrix(oMact))    
-        # T = get_end_effector_pose(model, data, tool_frame_id, q_pin)
-        # print("i")
-        # print("T: \n", clean_and_print_matrix(T))
+    #     frame_name = model.frames[i].name
+    #     print(f"i: {i}, Frame Name: {frame_name}\noMact: \n{clean_and_print_matrix(oMact)}")
+    #     T = get_end_effector_pose(model, data, i, q_pin)
+    #     print("T: \n", clean_and_print_matrix(T))
 
-    pin.forwardKinematics(model,data,q_pin)
-    # print("oMdes.translation:", oMdes.translation[i])
-    # for i in range(0, len(model.frames)):
-    #     pin.updateFramePlacement(model, data, i)
-    #     oMact = data.oMf[i]
-    #     print( "i:", "frame_id", "\noMact:", oMact)
-
-    # for i in range(0, len(model.frames)):
-    #     pin.updateFramePlacement(model, data, i)
-    #     oMact = data.oMf[i]
-    #     print( "i:", joint_id, "\noMact:", oMact)
-
-    oMact = data.oMi[joint_id]
-    print( "i:", joint_id, "\noMact: \n", clean_and_print_matrix(oMact))
-
-    # roll, pitch, yaw = R_matrix_to_euler(oMdes.rotation)
-    # print("oMdes\nRoll:", roll, "Pitch:", pitch, "Yaw:", yaw, '\n')
-    # roll, pitch, yaw = R_matrix_to_euler(oMact.rotation)
-    # print("oMact\nRoll:", roll, "Pitch:", pitch, "Yaw:", yaw, '\n')
-
-    # T_des_act = np.linalg.inv(oMact) @ oMdes
-    # print("T_des_act:\n", T_des_act)
-    # # print("i: ", i)
-
-# oMact:   R =
-#     0.500003    -0.866024 -3.67319e-06
-#  1.83661e-06 -3.18107e-06            1
-#    -0.866024    -0.500003  7.15926e-15
-#   p =  0.302611  0.213888 -0.188211
     # q_pin      = pin.neutral(model)
     eps    = 1e-4
     IT_MAX = 1000
@@ -116,22 +54,18 @@ def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
         # pin.updateFramePlacement(model, data, tool_frame_id)
         # oMdes = data.oMi[7] # check that oMdes.actInv(data.oMi[joint_id]) works
         T = get_end_effector_pose(model, data, tool_frame_id, q_pin)
-        print("T: \n", clean_and_print_matrix(T))
-        dMi_1 = oMdes.actInv(T)
-        dMi_2 = data.oMi[joint_id].actInv(oMdes)
-        
-        dMi = dMi_1
-        # print('dMi_1:', dMi_1)
-        # print('dMi_2:', dMi_2)
+        # print("T: \n", clean_and_print_matrix(T))
+        dMi = oMdes.actInv(T)        
 
         err = pin.log(dMi).vector
+
         if norm(err) < eps:
             success = True
             break
         if i >= IT_MAX:
             success = False
             break
-        J = pin.computeJointJacobian(model,data,q_pin,joint_id)
+        J = pin.computeFrameJacobian(model, data, q_pin, tool_frame_id)
         v = - J.T.dot(solve(J.dot(J.T) + damp * np.eye(6), err))
         q_pin = pin.integrate(model,q_pin,v*DT)
         if not i % 10:
@@ -149,6 +83,22 @@ def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
     q = pinocchio_to_standard(model, q_pin)
 
     return q
+
+## FUNCTIONS
+
+def clean_and_print_matrix(matrix, threshold=1e-4):
+    """Clean small values from matrix and return string representation"""
+    if isinstance(matrix, pin.SE3):
+        # Convert SE3 to 4x4 numpy array 
+        matrix_array = np.eye(4)
+        matrix_array[:3,:3] = matrix.rotation
+        matrix_array[:3,3] = matrix.translation
+    else:
+        matrix_array = np.array(matrix)
+        
+    matrix_clean = matrix_array.copy()
+    matrix_clean[np.abs(matrix_clean) < threshold] = 0
+    return matrix_clean
 
 def standard_to_pinocchio(model, q: np.ndarray) -> np.ndarray:
     """Convert standard joint angles (rad) to Pinocchio joint angles"""
@@ -281,3 +231,34 @@ def get_end_effector_pose(model, data, EE_frame_id, q: np.ndarray) -> np.ndarray
 # print("Base joint origin transformation from URDF:")
 # print("Translation:", T_base.translation)
 # print("Rotation:\n", T_base.rotation)
+
+# model = pin.buildModelFromUrdf(urdf_path)
+    # data = model.createData()
+    # # Use the default Pinocchio solver (e.g., Levenberg-Marquardt) as a placeholder
+    # q = q0.copy()
+    # q_pin = standard_to_pinocchio(model, q)
+    # for _ in range(max_iter):
+    #     pin.forwardKinematics(model, data, q_pin)
+    #     pin.updateFramePlacements(model, data)
+    #     current_pose = data.oMf[model.getFrameId(ee_frame)]
+    #     error_mat = pin.log(current_pose.inverse() * pin.SE3(target_pose[:3,:3], target_pose[:3,3]))
+    #     err = np.linalg.norm(error_mat)
+    #     if err < tol:
+    #         break
+    #     # Compute Jacobian
+    #     J = pin.computeFrameJacobian(model, data, q_pin, model.getFrameId(ee_frame))
+    #     dq = np.linalg.lstsq(J, error_mat, rcond=None)[0]
+    #     q += dq
+    # return q
+
+    # print("oMdes.translation:", oMdes.translation[i])
+    # for i in range(0, len(model.frames)):
+    #     pin.updateFramePlacement(model, data, i)
+    #     oMact = data.oMf[i]
+    #     print( "i:", "frame_id", "\noMact:", oMact)
+
+
+    # for joint_id in range(len(model.joints)):
+    #     oMact = data.oMi[joint_id]
+    #     joint_name = model.names[joint_id]
+    #     print(f"Joint ID: {joint_id}, Joint Name: {joint_name}\noMact: \n{clean_and_print_matrix(oMact)}")

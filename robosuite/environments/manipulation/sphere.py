@@ -286,8 +286,8 @@ class Sphere(ManipulationEnv):
 
     def _ik_left_arm_to_sphere_tangent(self, sphere_center, sphere_radius):
         # Compute the left-most point (assuming positive x is right)
-        target_pos = sphere_center + np.array([-sphere_radius, 0, 0])
-        target_pos = sphere_center
+        p_target = sphere_center + np.array([-sphere_radius, 0, 0])
+        p_target = sphere_center
 
         # GET T_wd_base
         lbase_id = self.sim.model.body_name2id('robot0_left_arm_fixed_base_link')
@@ -299,11 +299,14 @@ class Sphere(ManipulationEnv):
         T_wd_lbase[:3, :3] = R_wd_lbase
         T_wd_lbase[:3, 3] = p_wd_lbase
         
-        # GET T_wd_target
+        # GET end effector position
         lhand_id = self.sim.model.body_name2id('robot0_left_end_effector')
-        R_wd_target = self.sim.data.body_xmat[lhand_id].reshape(3, 3)
-        p_wd_target = data.xpos[lhand_id]
+        R_wd_ee = self.sim.data.body_xmat[lhand_id].reshape(3, 3)
+        p_wd_ee = data.xpos[lhand_id]
 
+        R_wd_target = R_wd_ee
+        p_wd_target = p_target # alternative p_wd_ee
+        # GET T_wd_target 
         T_wd_target = np.eye(4)
         T_wd_target[:3, :3] = R_wd_target
         T_wd_target[:3, 3] = p_wd_target
@@ -453,7 +456,9 @@ if __name__ == "__main__":
         print("Left hand position:", p_wd_lhand)
         print("Left hand rotation:\n", R_wd_lhand)
         # sphere_center = data.xpos[env.sim.model.body_name2id('sphere_main')]
+        
         sphere_radius = 0.05
+        
         desired_joint = env._ik_left_arm_to_sphere_tangent(left_hand_pos, sphere_radius)
         
         while viewer.is_running() and not env.done and data.time < simulation_time:

@@ -29,6 +29,10 @@ def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
     # Use the default Pinocchio solver (e.g., Levenberg-Marquardt) as a placeholder
     tool_frame_id = model.getFrameId(ee_frame)
     q = q0.copy()
+
+    print("len_q_pin", model.nq)
+    print("len_q", model.nv)
+
     q_pin = standard_to_pinocchio(model, q)
     
     pin.forwardKinematics(model,data,q_pin)
@@ -80,8 +84,11 @@ def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
     
     print('\nresult: %s' % q_pin.flatten().tolist())
     print('\nfinal error: %s' % err.T)
+    
+    print("q0:", q0)
+    print("q_pin:", q_pin)
     q = pinocchio_to_standard(model, q_pin)
-
+    print("q final:", q)
     return q
 
 ## FUNCTIONS
@@ -111,6 +118,9 @@ def standard_to_pinocchio(model, q: np.ndarray) -> np.ndarray:
             q_pin[j.idx_q:j.idx_q+2] = np.array([np.cos(q[j.idx_v]), np.sin(q[j.idx_v])])
     return q_pin
 
+def normalize_angle(angle):
+    """Normalize angle to [-π, π]"""
+    return (angle + np.pi) % (2 * np.pi) - np.pi
 
 def pinocchio_to_standard(model, q_pin: np.ndarray) -> np.ndarray:
     """Convert Pinocchio joint angles to standard joint angles (rad)"""
@@ -118,11 +128,12 @@ def pinocchio_to_standard(model, q_pin: np.ndarray) -> np.ndarray:
     for i, j in enumerate(model.joints[1:]):
         if j.nq == 1:
             q[j.idx_v] = q_pin[j.idx_q]
+            # if j.type == pin.JointType.JointModelRZ:  # For continuous revolute joints
+            #     q[j.idx_v] = normalize_angle(q[j.idx_v])
         else:
             q_back = np.arctan2(q_pin[j.idx_q+1], q_pin[j.idx_q])
-            q[j.idx_v] = q_back + 2*np.pi if q_back < 0 else q_back
+            q[j.idx_v] = normalize_angle(q_back)
     return q
-
 
 def R_matrix_to_euler(R):
     """

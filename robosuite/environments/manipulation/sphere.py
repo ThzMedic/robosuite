@@ -123,10 +123,6 @@ class Sphere(ManipulationEnv):
             table_offset=self.table_offset,
         )
         # Initialize sphere instead of lemon
-        
-        # self.ball = LemonObject(
-        #     name="lemon",
-        # )
 
         self.ball = SphereObject(
             name="sphere", # has to match the model="sphere" in the xml file
@@ -284,10 +280,16 @@ class Sphere(ManipulationEnv):
         env_action = active_robot.create_action_vector(action_dict)
         return env_action
 
-    def _ik_left_arm_to_sphere_tangent(self, sphere_center, sphere_radius):
+    def _ik_left_arm_to_sphere_tangent(self, sphere_center, R_desired, sphere_radius):
         # Compute the left-most point (assuming positive x is right)
         p_target = sphere_center + np.array([-sphere_radius, 0, 0])
         p_target = sphere_center
+
+        # HARD CODED for desired joints to be all 0
+        # p_target = np.array([-0.56  ,  1.2454,  1.2994])
+        # R_desired = np.array([[ 1., -0.,  0.],
+        #                     [ 0.,  0.,  1.],
+        #                     [-0., -1.,  0.]])
 
         # GET T_wd_base
         lbase_id = self.sim.model.body_name2id('robot0_left_arm_fixed_base_link')
@@ -304,13 +306,13 @@ class Sphere(ManipulationEnv):
         R_wd_ee = self.sim.data.body_xmat[lhand_id].reshape(3, 3)
         p_wd_ee = data.xpos[lhand_id]
 
-        R_wd_target = R_wd_ee
+        R_wd_target = R_desired # alternative R_wd_ee
         p_wd_target = p_target # alternative p_wd_ee
         # GET T_wd_target 
         T_wd_target = np.eye(4)
         T_wd_target[:3, :3] = R_wd_target
         T_wd_target[:3, 3] = p_wd_target
-        T_wd_target[:3, 3] = left_hand_pos + np.array([-0.2, 0, 0])
+        # T_wd_target[:3, 3] = p_wd_ee
 
         T_lbase_target = np.linalg.inv(T_wd_lbase) @ T_wd_target
 
@@ -427,6 +429,7 @@ if __name__ == "__main__":
     contact_object = 'sphere_g0'
 
     # ball_body_id = env.sim.model.body_name2id('sphere_main')
+
     
     with mujoco.viewer.launch_passive(model, data) as viewer:
         viewer.opt.frame = mujoco.mjtFrame.mjFRAME_SITE
@@ -439,7 +442,7 @@ if __name__ == "__main__":
         time_keeper = TimeKeeper(desired_freq=1/model.opt.timestep)
         
         # Set the targeting pose to be just a bit front of the initial robot hand position
-        left_hand_body_id = env.sim.model.body_name2id('robot0_left_hand')
+        left_hand_body_id = env.sim.model.body_name2id('robot0_left_end_effector')
         left_hand_pos = data.xpos[left_hand_body_id]
 
         ball_body_id = env.sim.model.body_name2id('sphere_main')
@@ -456,10 +459,28 @@ if __name__ == "__main__":
         print("Left hand position:", p_wd_lhand)
         print("Left hand rotation:\n", R_wd_lhand)
         # sphere_center = data.xpos[env.sim.model.body_name2id('sphere_main')]
-        
         sphere_radius = 0.05
         
-        desired_joint = env._ik_left_arm_to_sphere_tangent(left_hand_pos, sphere_radius)
+        # desired_joint = env._ik_left_arm_to_sphere_tangent(left_hand_pos, sphere_radius)
+        
+        circle_radius = 0.1  # radius of the circle around the hand
+        num_points = 16      # number of points in the circle        
+        
+        desired_pos_list = [] # store transformation matrix        
+        
+        for i in range(num_points):
+            angle = 2 * np.pi * i / num_points
+            # Create circle in the XY plane around the hand
+            x = p_wd_lhand[0] + circle_radius * np.cos(angle)
+            y = p_wd_lhand[1] + circle_radius * np.sin(angle)
+            z = p_wd_lhand[2]  # keep same height as hand
+            desired_pos_list.append(np.array([x, y, z]))
+
+        current_action_index = 0
+        last_action_time = 0
+        action_interval = 0.1  # Change action every n seconds
+
+        desired_joint = env._ik_left_arm_to_sphere_tangent(left_hand_pos, R_wd_lhand, sphere_radius)
         
         while viewer.is_running() and not env.done and data.time < simulation_time:
             if time_keeper.should_step():
@@ -482,6 +503,24 @@ if __name__ == "__main__":
                 # zeros_config = np.zeros(14)
                 # env_action = env._jog_robot_to_pose(zeros_config, desired_torso_height)
                 
+                if data.time - last_action_time >= action_interval:
+                    current_action_index = (current_action_index + 1) % len(desired_pos_list)
+                    
+                    desired_pos = desired_pos_list[current_action_index]
+                    sphere_radius = 0.0
+                    R_desired = R_wd_lhand
+                    desired_joint = env._ik_left_arm_to_sphere_tangent(desired_pos, R_desired, sphere_radius)
+                    
+                    last_action_time = data.time
+                    print(f"Switching to action {current_action_index} at time {data.time:.2f}")
+                
+                # Apply the current action
+                
+                # desired_joint = env._ik_left_arm_to_sphere_tangent(left_hand_pos, sphere_radius)
+               
+                # env_action = env._jog_robot_to_pose(desired_joint)
+                # env.step(env_action)
+
                 env_action = env._jog_robot_to_pose(desired_joint)
                 # env_action = np.zeros_like(env_action)
                 env.step(env_action)

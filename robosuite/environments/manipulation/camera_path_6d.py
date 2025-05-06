@@ -21,14 +21,14 @@ def generate_upper_hemisphere_path_with_orientation(radius=1.0, num_points=10):
 
     # Convert spherical to Cartesian coordinates
     # Case 1: Rotation about the X-axis
-    # x = radius * np.sin(theta) * np.sin(phi)
-    # y = radius * np.sin(theta) * np.cos(phi)
-    # z = radius * np.cos(theta)
+    x = radius * np.sin(theta) * np.sin(phi)
+    y = radius * np.sin(theta) * np.cos(phi)
+    z = radius * np.cos(theta)
 
     # Case 2: Rotation about the Y-axis
-    x = radius * np.sin(theta) * np.cos(phi)
-    y = radius * np.sin(theta) * np.sin(phi)
-    z = radius * np.cos(theta)
+    # x = radius * np.sin(theta) * np.cos(phi)
+    # y = radius * np.sin(theta) * np.sin(phi)
+    # z = radius * np.cos(theta)
 
     # Case 3: Rotation about the Z-axis
     # x = radius * np.cos(theta)

@@ -1,7 +1,9 @@
 from collections import OrderedDict
 
 import numpy as np
+import sys
 np.set_printoptions(precision=4, suppress=True)
+np.set_printoptions(threshold=sys.maxsize)
 import robosuite as suite
 from robosuite.environments.manipulation.manipulation_env import ManipulationEnv
 from robosuite.models.arenas import TableArena
@@ -15,6 +17,9 @@ from robosuite.controllers import load_part_controller_config
 # control_config = load_part_controller_config(default_controller="JOINT_POSITION") # this doesn't even work...
 from robosuite.controllers import load_composite_controller_config
 from robosuite.kinematics.pinocchio_ik import compute_ik
+
+from camera_path_6d import generate_upper_hemisphere_path_with_orientation
+from ICP_tool_box import rotate_frame_on_ball
 
 import mujoco
 import time
@@ -139,14 +144,15 @@ class Sphere(ManipulationEnv):
             self.placement_initializer = UniformRandomSampler(
                 name="ObjectSampler",
                 mujoco_objects=self.ball,
-                x_range=[-0.56, -0.56],
-                y_range=[1.245, 1.245],
+                x_range=[-0.1124, -0.1124],
+                y_range=[0.3297, 0.3297],
                 rotation=None,
                 ensure_object_boundary_in_range=False,
                 ensure_valid_placement=True,
                 reference_pos=self.table_offset,
-                z_offset=0.4,  # 1 meter above the table
+                z_offset=1.1-0.5,  # _ - 0.5 meter above the table
             )
+            # left_ee_pos: array([-0.1124,  0.3297,  0.9375])
 
         # task includes arena, robot, and objects of interest
         self.model = ManipulationTask(
@@ -278,12 +284,21 @@ class Sphere(ManipulationEnv):
         action_dict["base"] = np.array([0.0, 0.0, 0.0])
 
         env_action = active_robot.create_action_vector(action_dict)
-        return env_action
 
-    def _ik_left_arm_to_sphere_tangent(self, sphere_center, R_desired, sphere_radius):
+        left_arm_joints = env.sim.data.qpos[env.robots[0]._ref_joint_pos_indexes[7:14]]
+
+        joint_error = desired_arm_pos[7:] - left_arm_joints
+        target_reached_bool = np.all(np.abs(joint_error < 0.01))
+
+        return env_action, target_reached_bool
+
+    def _ik_left_arm(self, p_wd_target, R_wd_target, lq0):
+        """
+        Performs inverse kinematics for the left arm to reach a target position and orientation.
+        """
         # Compute the left-most point (assuming positive x is right)
-        p_target = sphere_center + np.array([-sphere_radius, 0, 0])
-        p_target = sphere_center
+        # p_target = sphere_center + np.array([-sphere_radius, 0, 0])
+        # p_target = sphere_center
 
         # HARD CODED for desired joints to be all 0
         # p_target = np.array([-0.56  ,  1.2454,  1.2994])
@@ -301,13 +316,13 @@ class Sphere(ManipulationEnv):
         T_wd_lbase[:3, :3] = R_wd_lbase
         T_wd_lbase[:3, 3] = p_wd_lbase
         
-        # GET end effector position
+        # GET end effector position for testing
         lhand_id = self.sim.model.body_name2id('robot0_left_end_effector')
         R_wd_ee = self.sim.data.body_xmat[lhand_id].reshape(3, 3)
         p_wd_ee = data.xpos[lhand_id]
 
-        R_wd_target = R_desired # alternative R_wd_ee
-        p_wd_target = p_target # alternative p_wd_ee
+        # R_wd_target = R_wd_ee # alternative R_wd_ee for testing
+        # p_wd_target = p_wd_ee # alternative p_wd_ee for testing
         # GET T_wd_target 
         T_wd_target = np.eye(4)
         T_wd_target[:3, :3] = R_wd_target
@@ -322,23 +337,68 @@ class Sphere(ManipulationEnv):
         
         # Initial configuration for the left arm (using full robot qpos; adjust joint indices)
         # q0 = self.robots[0].init_qpos.copy()
-        lq0 = self.sim.data.qpos[self.robots[0]._ref_joint_pos_indexes[7:14]]
+        # lq0 = self.sim.data.qpos[self.robots[0]._ref_joint_pos_indexes[7:14]]
 
         # Name of the left end-effector frame
         left_ee = "end_effector"
 
         # Compute the inverse kinematics solution using Pinnocchio
         q_sol = compute_ik(urdf_path, left_ee, T_lbase_target, lq0)
-        print("initial qpos:", lq0)
-        print("IK solution:", q_sol)
-        print("", q_sol == lq0)
+        # print("initial qpos:", lq0)
+        # print("IK solution:", q_sol)
+        # print("", q_sol == lq0)
 
         # Set left arm joints angles which are indexed from 7 to 14.
         desired_arm_pos = self.robots[0].init_qpos.copy()
         desired_arm_pos[7:14] = q_sol
         
         return desired_arm_pos
+    
+    def generate_pose_matrices(self, center, radius, num_points):
+        """
+        Generate pose matrices for a set of points on the upper hemisphere around a sphere.
+        """
+        path_points = generate_upper_hemisphere_path_with_orientation(radius, num_points)
+        pose_matrices = []
+
+        print("\ncenter:", center)
+        for i, point in enumerate(path_points):
+            print("i: ", i)
+            x, y, z, yaw = point
+            print(f"point: {point}")
+            position = center + np.array([x, y, z])
+            print("position: ", position)
+
+            direction = -(position - center)  # Direction vector from the flower center to camera
+            print("direction: ", direction)
+            pitch_angle = np.arctan2(direction[0], direction[2])
+            # print("pitch angle: ", pitch_angle)
+            # roll_angle = 0
+            roll_angle = np.arctan2(direction[2], direction[1]) # - 3*np.pi/2
+            print("roll angle: ", roll_angle)
+            yaw_angle = yaw
+            # print("yaw angle: ", yaw_angle)
+            # Get a transformation matrix H that orients the camera to face the flower (center)
+            # H = rotate_frame_on_ball(direction, roll=roll_angle, pitch=pitch_angle, yaw=yaw_angle)
+            H = rotate_frame_on_ball(direction, roll=roll_angle, pitch=0, yaw=0)
+            # print("H: \n", H)
             
+            z_axis = direction / np.linalg.norm(direction)
+            up = np.array([0, 0, 1])  # Assuming the camera's up direction is along the z-axis
+            if np.allclose(z_axis, up) or np.allclose(z_axis, -up):
+                up = np.array([0, 1, 0])
+
+            x_axis = np.cross(up, z_axis)
+            x_axis /= np.linalg.norm(x_axis)
+            y_axis = np.cross(z_axis, x_axis)
+            H[:3, :3] = np.column_stack((x_axis, y_axis, z_axis))
+            H[:3, 3] = position
+
+            pose_matrices.append(H)
+
+        return pose_matrices
+            
+
 class TimeKeeper:
     def __init__(self, desired_freq=60):
         self.period = 1.0 / desired_freq
@@ -441,10 +501,11 @@ if __name__ == "__main__":
 
         time_keeper = TimeKeeper(desired_freq=1/model.opt.timestep)
         
-        # Set the targeting pose to be just a bit front of the initial robot hand position
-        left_hand_body_id = env.sim.model.body_name2id('robot0_left_end_effector')
-        left_hand_pos = data.xpos[left_hand_body_id]
-
+        # get the initial pose of the left end effector
+        left_ee_body_id = env.sim.model.body_name2id('robot0_left_end_effector')
+        left_ee_pos = data.xpos[left_ee_body_id]
+        R_wd_lee = env.sim.data.body_xmat[left_ee_body_id].reshape(3, 3)
+        
         ball_body_id = env.sim.model.body_name2id('sphere_main')
         p_wd_ball = env.sim.data.body_xpos[ball_body_id]
         R_wd_ball = env.sim.data.body_xmat[ball_body_id].reshape(3, 3)
@@ -452,36 +513,85 @@ if __name__ == "__main__":
         print("Ball position:", p_wd_ball)
         print("Ball rotation:\n", R_wd_ball)
 
-        p_wd_lhand = env.sim.data.body_xpos[left_hand_body_id]
+        p_wd_lee = env.sim.data.body_xpos[left_ee_body_id]
         
-        print("Bool: ", left_hand_pos == p_wd_lhand)
-        R_wd_lhand = env.sim.data.body_xmat[left_hand_body_id].reshape(3, 3)
-        print("Left hand position:", p_wd_lhand)
-        print("Left hand rotation:\n", R_wd_lhand)
+        print("Bool: ", left_ee_pos == p_wd_lee)
+        
+        print("Left hand position:", p_wd_lee)
+        print("Left hand rotation:\n", R_wd_lee)
         # sphere_center = data.xpos[env.sim.model.body_name2id('sphere_main')]
-        sphere_radius = 0.05
         
-        # desired_joint = env._ik_left_arm_to_sphere_tangent(left_hand_pos, sphere_radius)
+        # desired_joint = env._ik_left_arm(left_ee_pos, sphere_radius)
         
-        circle_radius = 0.1  # radius of the circle around the hand
-        num_points = 16      # number of points in the circle        
+        # circle_radius = 0.1  # radius of the circle around the hand
+        # num_points = 16      # number of points in the circle        
         
-        desired_pos_list = [] # store transformation matrix        
+        # desired_pos_list = [] # store transformation matrix        
         
-        for i in range(num_points):
-            angle = 2 * np.pi * i / num_points
-            # Create circle in the XY plane around the hand
-            x = p_wd_lhand[0] + circle_radius * np.cos(angle)
-            y = p_wd_lhand[1] + circle_radius * np.sin(angle)
-            z = p_wd_lhand[2]  # keep same height as hand
-            desired_pos_list.append(np.array([x, y, z]))
+        # for i in range(num_points):
+        #     angle = 2 * np.pi * i / num_points
+        #     # Create circle in the XY plane around the hand
+        #     x = p_wd_lee[0] + circle_radius * np.cos(angle)
+        #     y = p_wd_lee[1] + circle_radius * np.sin(angle)
+        #     z = p_wd_lee[2]  # keep same height as hand
+        #     desired_pos_list.append(np.array([x, y, z]))        
+        
+        center = p_wd_ball
+        radius = 0.15
+        num_points = 12
+        desired_list = env.generate_pose_matrices(center, radius, num_points)
+        print("Desired list: ", desired_list)
 
         current_action_index = 0
         last_action_time = 0
-        action_interval = 0.1  # Change action every n seconds
+        action_interval = 1.0  # Change action every n seconds
+        target_reached_bool = False
+        time_interval_start = False
 
-        desired_joint = env._ik_left_arm_to_sphere_tangent(left_hand_pos, R_wd_lhand, sphere_radius)
+        lq0 = env.sim.data.qpos[env.robots[0]._ref_joint_pos_indexes[7:14]]
+
+        desired_joint = env._ik_left_arm(left_ee_pos, R_wd_lee, lq0)
         
+        desired_joints = []
+        # Generate desired poses vector
+        print("center:", center)
+        print("R_hand:", R_wd_lee)
+        for i in range(len(desired_list)):            
+            desired_pos = desired_list[i][:3, 3]
+            desired_R = desired_list[i][:3, :3]
+            # print("Desired position:", desired_pos)
+            # print("Desired rotation:\n", desired_R)
+            print("desired_Transform:\n", desired_list[i])
+            
+            R_desired = np.eye(3) # R_wd_lee
+            R_desired = desired_R
+            desired_joint = env._ik_left_arm(desired_pos, R_desired, lq0)
+            lq0 = desired_joint
+            desired_joints.append(desired_joint)
+
+        desired_joints = [desired_joints[-1]]
+        
+        for i in range(len(desired_list) - 2, -1, -1):            
+            print("i: ", i)
+            desired_pos = desired_list[i][:3, 3]
+            desired_R = desired_list[i][:3, :3]
+            # print("Desired position:", desired_pos)
+            # print("Desired rotation:\n", desired_R)
+            print("desired_Transform:\n", desired_list[i])
+            
+            R_desired = np.eye(3) # R_wd_lee
+            R_desired = desired_R
+            desired_joint = env._ik_left_arm(desired_pos, R_desired, lq0)
+            lq0 = desired_joint
+            desired_joints.insert(0, desired_joint)
+    
+        print("Desired joint angles:")
+        for i, joint in enumerate(desired_joints):
+            print(f"Desired Rotation\n {i}: {desired_list[i][:3, :3]}")
+            print(f"Pose \n{i}: {joint}")
+
+        desired_joint = desired_joints[0]
+
         while viewer.is_running() and not env.done and data.time < simulation_time:
             if time_keeper.should_step():
                 # Simulation step
@@ -503,25 +613,29 @@ if __name__ == "__main__":
                 # zeros_config = np.zeros(14)
                 # env_action = env._jog_robot_to_pose(zeros_config, desired_torso_height)
                 
+                # set last action time when the target is reached
+                if target_reached_bool and not time_interval_start:
+                    print(f"Target reached at time {data.time:.2f}")
+                    last_action_time = data.time
+                    time_interval_start = True
+
                 if data.time - last_action_time >= action_interval:
-                    current_action_index = (current_action_index + 1) % len(desired_pos_list)
+                    current_action_index = (current_action_index + 1) % len(desired_list)
                     
-                    desired_pos = desired_pos_list[current_action_index]
-                    sphere_radius = 0.0
-                    R_desired = R_wd_lhand
-                    desired_joint = env._ik_left_arm_to_sphere_tangent(desired_pos, R_desired, sphere_radius)
+                    desired_joint = desired_joints[current_action_index]
                     
+                    time_interval_start = False
                     last_action_time = data.time
                     print(f"Switching to action {current_action_index} at time {data.time:.2f}")
                 
                 # Apply the current action
                 
-                # desired_joint = env._ik_left_arm_to_sphere_tangent(left_hand_pos, sphere_radius)
+                # desired_joint = env._ik_left_arm(left_ee_pos, sphere_radius)
                
                 # env_action = env._jog_robot_to_pose(desired_joint)
                 # env.step(env_action)
 
-                env_action = env._jog_robot_to_pose(desired_joint)
+                env_action, target_reached_bool = env._jog_robot_to_pose(desired_joint)
                 # env_action = np.zeros_like(env_action)
                 env.step(env_action)
 

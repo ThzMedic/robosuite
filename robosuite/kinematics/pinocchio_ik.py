@@ -30,10 +30,9 @@ def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
     tool_frame_id = model.getFrameId(ee_frame)
     q = q0.copy()
 
-    print("len_q_pin", model.nq)
-    print("len_q", model.nv)
-
     q_pin = standard_to_pinocchio(model, q)
+    q_pin_orginal = q_pin.copy()
+    print("q_pin:", q_pin)
     
     pin.forwardKinematics(model,data,q_pin)
 
@@ -73,20 +72,18 @@ def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
         v = - J.T.dot(solve(J.dot(J.T) + damp * np.eye(6), err))
         q_pin = pin.integrate(model,q_pin,v*DT)
         if not i % 10:
-            print('%d: error = %s' % (i, err.T))
+            # print('%d: error = %s' % (i, err.T))
+            pass
         i += 1
     
     if success:
-        print("Convergence achieved!")
-        print("Iterations:", i)
+        print("Convergence achieved! Iterations:", i)
     else:
         print("\nWarning: the iterative algorithm has not reached convergence to the desired precision")
+        # q_pin = q_pin_orginal
     
-    print('\nresult: %s' % q_pin.flatten().tolist())
-    print('\nfinal error: %s' % err.T)
-    
-    print("q0:", q0)
-    print("q_pin:", q_pin)
+    # print("q0:", q0)
+    # print("q_pin:", q_pin)
     q = pinocchio_to_standard(model, q_pin)
     print("q final:", q)
     return q
@@ -168,99 +165,6 @@ def get_end_effector_pose(model, data, EE_frame_id, q: np.ndarray) -> np.ndarray
     # rotation = np.degrees(pin.rpy.matrixToRpy(T.rotation))
     # return np.concatenate([position, rotation])
     return T
-
-# def T_matrix_to_euler(T):
-#     """
-#     Extracts roll, pitch, and yaw (RPY) angles from a 4x4 transformation matrix.
-
-#     Parameters:
-#         T (numpy.ndarray): A 4x4 transformation matrix.
-
-#     Returns:
-#         tuple: (roll, pitch, yaw) in radians.
-#     """
-#     R = T[:3, :3]  # Extract the rotation matrix
-
-#     # Compute pitch
-#     if abs(R[2, 0]) != 1:
-#         pitch = -np.arcsin(R[2, 0])
-#         cos_pitch = np.cos(pitch)
-#         roll = np.arctan2(R[2, 1] / cos_pitch, R[2, 2] / cos_pitch)
-#         yaw = np.arctan2(R[1, 0] / cos_pitch, R[0, 0] / cos_pitch)
-#     else:
-#         # Gimbal lock case
-#         yaw = 0  # Can be set to any value
-#         if R[2, 0] == -1:
-#             pitch = np.pi / 2
-#             roll = np.arctan2(R[0, 1], R[0, 2])
-#         else:
-#             pitch = -np.pi / 2
-#             roll = np.arctan2(-R[0, 1], -R[0, 2])
-
-#     return roll, pitch, yaw
-
-
-# def parse_urdf_origin(origin_str):
-#     """Parse URDF origin tag string into xyz and rpy values"""
-#     # Parse origin tag like: <origin rpy="-1.5708 0 0" xyz="0 -0.058 0.232548"/>
-#     xyz_str = origin_str[origin_str.find('xyz="')+5:].split('"')[0]
-#     rpy_str = origin_str[origin_str.find('rpy="')+5:].split('"')[0]
-    
-#     # Convert strings to numpy arrays
-#     xyz = np.array([float(x) for x in xyz_str.split()])
-#     rpy = np.array([float(x) for x in rpy_str.split()])
-    
-#     return xyz, rpy[0], rpy[1], rpy[2]  # returns position and roll,pitch,yaw
-
-# # Example usage:
-# origin_tag = '<origin rpy="-1.5708 0 0" xyz="0 -0.058 0.232548"/>'
-# xyz, roll, pitch, yaw = parse_urdf_origin(origin_tag)
-
-# T_ee_1 = data.oMi[7]
-# pin.forwardKinematics(model,data,q_pin)
-# T_ee_2 = data.oMi[7]
-# T_trans = T_ee_2.translation
-# T_rot = T_ee_2.rotation
-# var = T_ee_1 == T_ee_2
-# T_rot = T_ee_2.rotation
-# var = T_ee_1 == T_ee_2
-# T_trans_base = data.oMi[0].translation
-# T_rot_base = data.oMi[0].rotation
-
-# """Creates the base transform from the URDF <origin> tag values"""
-# # Values from URDF: <origin rpy="-1.5708 0 0" xyz="0 -0.058 0.232548"/>
-# xyz_base = np.array([0, -0.058, 0.232548])
-# roll = -1.5708  # -pi/2
-# pitch = 0
-# yaw = 0
-
-# # Create rotation matrix from roll, pitch, yaw
-# R_base = pin.rpy.rpyToMatrix(roll, pitch, yaw)
-
-# # Create SE3 transform
-# T_base = pin.SE3(R_base, xyz_base)
-# print("Base joint origin transformation from URDF:")
-# print("Translation:", T_base.translation)
-# print("Rotation:\n", T_base.rotation)
-
-# model = pin.buildModelFromUrdf(urdf_path)
-    # data = model.createData()
-    # # Use the default Pinocchio solver (e.g., Levenberg-Marquardt) as a placeholder
-    # q = q0.copy()
-    # q_pin = standard_to_pinocchio(model, q)
-    # for _ in range(max_iter):
-    #     pin.forwardKinematics(model, data, q_pin)
-    #     pin.updateFramePlacements(model, data)
-    #     current_pose = data.oMf[model.getFrameId(ee_frame)]
-    #     error_mat = pin.log(current_pose.inverse() * pin.SE3(target_pose[:3,:3], target_pose[:3,3]))
-    #     err = np.linalg.norm(error_mat)
-    #     if err < tol:
-    #         break
-    #     # Compute Jacobian
-    #     J = pin.computeFrameJacobian(model, data, q_pin, model.getFrameId(ee_frame))
-    #     dq = np.linalg.lstsq(J, error_mat, rcond=None)[0]
-    #     q += dq
-    # return q
 
     # print("oMdes.translation:", oMdes.translation[i])
     # for i in range(0, len(model.frames)):

@@ -3,6 +3,39 @@ import numpy as np
 np.set_printoptions(precision=4, suppress=True, threshold=1e-4)
 from numpy.linalg import norm, solve
 
+def compute_fk(urdf_path, q, ee_frame):
+    """
+    Compute forward kinematics using Pinocchio.
+    
+    Args:
+        urdf_path (str): Path to the robot's URDF.
+        q (np.ndarray): Joint configuration.
+        ee_frame (str): Name of the end-effector frame.
+        
+    Returns:
+        np.ndarray: 4x4 homogeneous transformation matrix of the end-effector.
+    """
+    
+    model = pin.buildModelFromUrdf(urdf_path)
+    data = model.createData()
+    
+    # Compute forward kinematics
+    q_pin = standard_to_pinocchio(model, q)
+    pin.forwardKinematics(model, data, q_pin)
+    
+    for i in range(0, len(model.frames)):
+        pin.updateFramePlacement(model, data, i)
+        oMact = data.oMf[i]
+        frame_name = model.frames[i].name
+        print(f"i: {i}, Frame Name: {frame_name}\noMact: \n{clean_and_print_matrix(oMact)}")
+    # Get the end-effector frame ID
+    tool_frame_id = model.getFrameId(ee_frame)
+    
+    # Get the end-effector pose
+    T = get_end_effector_pose(model, data, tool_frame_id, q_pin)
+    
+    return fk
+
 def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
     """
     Compute inverse kinematics using Pinocchio.
@@ -21,7 +54,7 @@ def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
     """
 
     oMdes = pin.SE3(target_pose[:3,:3], target_pose[:3,3])
-    print("oMdes: \n", clean_and_print_matrix(oMdes))
+    # print("oMdes: \n", clean_and_print_matrix(oMdes))
 
     model = pin.buildModelFromUrdf(urdf_path)
     data = model.createData()# model = pin.buildModelFromUrdf(urdf_path)
@@ -32,7 +65,7 @@ def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
 
     q_pin = standard_to_pinocchio(model, q)
     q_pin_orginal = q_pin.copy()
-    print("q_pin:", q_pin)
+    # print("q_pin:", q_pin)
     
     pin.forwardKinematics(model,data,q_pin)
 
@@ -50,6 +83,9 @@ def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
     IT_MAX = 1000
     DT     = 1e-1
     damp   = 1e-12
+
+    J = pin.computeFrameJacobian(model, data, q_pin, tool_frame_id)
+
 
     i = 0
     while True:
@@ -76,6 +112,7 @@ def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
             pass
         i += 1
     
+    
     if success:
         print("Convergence achieved! Iterations:", i)
     else:
@@ -86,7 +123,8 @@ def compute_ik(urdf_path, ee_frame, target_pose, q0, max_iter=100, tol=1e-4):
     # print("q_pin:", q_pin)
     q = pinocchio_to_standard(model, q_pin)
     print("q final:", q)
-    return q
+    print("J\n:", J)
+    return q, J
 
 ## FUNCTIONS
 

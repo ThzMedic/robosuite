@@ -16,7 +16,7 @@ from robosuite.utils.transform_utils import convert_quat
 from robosuite.controllers import load_part_controller_config
 # control_config = load_part_controller_config(default_controller="JOINT_POSITION") # this doesn't even work...
 from robosuite.controllers import load_composite_controller_config
-from robosuite.kinematics.pinocchio_ik import compute_ik
+from robosuite.kinematics.pinocchio_ik import compute_ik, compute_fk
 
 from camera_path_6d import generate_upper_hemisphere_path_with_orientation
 from ICP_tool_box import rotate_frame_on_ball
@@ -24,6 +24,10 @@ from ICP_tool_box import rotate_frame_on_ball
 import mujoco
 import time
 import matplotlib.pyplot as plt
+
+# RRT
+import random
+from collections import deque
 
 class Sphere(ManipulationEnv):
     def __init__(
@@ -294,7 +298,7 @@ class Sphere(ManipulationEnv):
 
     def _ik_left_arm(self, p_wd_target, R_wd_target, lq0):
         """
-        Performs inverse kinematics for the left arm to reach a target position and orientation.
+        Performs inverse kinematics for joint angles of the left arm to reach a target position and orientation.
         """
         # Compute the left-most point (assuming positive x is right)
         # p_target = sphere_center + np.array([-sphere_radius, 0, 0])
@@ -343,16 +347,19 @@ class Sphere(ManipulationEnv):
         left_ee = "end_effector"
 
         # Compute the inverse kinematics solution using Pinnocchio
-        q_sol = compute_ik(urdf_path, left_ee, T_lbase_target, lq0)
+        q_sol, J = compute_ik(urdf_path, left_ee, T_lbase_target, lq0)
         # print("initial qpos:", lq0)
         # print("IK solution:", q_sol)
         # print("", q_sol == lq0)
+
+        # Jacobian SVD Calc
+        _, s, _ = np.linalg.svd(J)
 
         # Set left arm joints angles which are indexed from 7 to 14.
         desired_arm_pos = self.robots[0].init_qpos.copy()
         desired_arm_pos[7:14] = q_sol
         
-        return desired_arm_pos
+        return desired_arm_pos, s
     
     def generate_pose_matrices(self, center, radius, num_points):
         """
@@ -361,21 +368,21 @@ class Sphere(ManipulationEnv):
         path_points = generate_upper_hemisphere_path_with_orientation(radius, num_points)
         pose_matrices = []
 
-        print("\ncenter:", center)
+        # print("\ncenter:", center)
         for i, point in enumerate(path_points):
-            print("i: ", i)
+            # print("i: ", i)
             x, y, z, yaw = point
-            print(f"point: {point}")
+            # print(f"point: {point}")
             position = center + np.array([x, y, z])
-            print("position: ", position)
+            # print("position: ", position)
 
             direction = -(position - center)  # Direction vector from the flower center to camera
-            print("direction: ", direction)
+            # print("direction: ", direction)
             pitch_angle = np.arctan2(direction[0], direction[2])
             # print("pitch angle: ", pitch_angle)
             # roll_angle = 0
             roll_angle = np.arctan2(direction[2], direction[1]) # - 3*np.pi/2
-            print("roll angle: ", roll_angle)
+            # print("roll angle: ", roll_angle)
             yaw_angle = yaw
             # print("yaw angle: ", yaw_angle)
             # Get a transformation matrix H that orients the camera to face the flower (center)
@@ -397,7 +404,111 @@ class Sphere(ManipulationEnv):
             pose_matrices.append(H)
 
         return pose_matrices
-            
+    
+    # RRT
+    # def in_collision(self, q):
+    #     urdf_path = "robosuite/models/assets/robots/dual_kinova3/leonardo.urdf"
+    #     ee_frame = "end_effector"
+        
+    #     fk = compute_fk(urdf_path, q, ee_frame)     # 7→link poses
+        
+    #     return any(link.collides(obs) for link in robot + obstacles)
+
+    def in_collision(self, env, q_left_arm, ignore_self_collision=True):
+        """
+        Checks for any collisions when the robot is at joint configuration q.
+
+        Args:
+            env      (robosuite.Environment): your robosuite env (already reset).
+            q        (array-like, shape=(n_dof,)): desired joint positions.
+            ignore_self_collision (bool): if True, skips contacts between robot links.
+
+        Returns:
+            bool: True if any (non-ignored) contact is present.
+        """
+        sim = env.sim
+        model = sim.model
+        data  = sim.data
+
+        # 1) Set all qpos (robot + world) to q; assumes your robot occupies the first model.nq entries
+        nq = model.nq
+        q = env.sim.data.qpos
+        q[env.robots[0]._ref_joint_pos_indexes[7:14]] = q_left_arm
+        q = np.array(q).flatten()
+        assert q.shape[0] == nq, f"Expected {nq} joints, got {q.shape[0]}"
+        data.qpos[:nq] = q
+        sim.forward()   # update all kinematics
+
+        # 2) Inspect contacts
+        for i in range(data.ncon):
+            c = data.contact[i]
+            geom1 = model.geom_id2name(c.geom1)
+            geom2 = model.geom_id2name(c.geom2)
+
+            # 3) Optionally skip robot–robot contacts
+            if ignore_self_collision:
+                # assumes all robot geoms share a common prefix, e.g. "robot0"
+                prefix = env.robots[0].robot_model.naming_prefix  # e.g. "robot0"
+                if geom1.startswith(prefix) and geom2.startswith(prefix):
+                    continue
+
+            # any remaining contact counts as collision
+            return True
+
+        return False
+    
+    def rrt(self, env, q_start, q_goal, max_iters=5000, step=0.1):
+        tree = {tuple(q_start): None}
+        limits = []
+        for idx in env.robots[0]._ref_joint_pos_indexes[7:14]:
+            if not env.sim.model.jnt_limited[idx]:
+                # if joint is NOT limited, use -inf and inf
+                limits.append([-np.inf, np.inf])
+            else:
+                limits.append([
+                    env.sim.model.jnt_range[idx][0],  # lower limit
+                    env.sim.model.jnt_range[idx][1]   # upper limit
+                ])
+        joint_limits = limits
+        
+        for _ in range(max_iters):
+            # 1. Sample random config (goal-bias with small prob)
+            if random.random() < 0.05:
+                q_rand = q_goal
+            else:
+                q_rand = [random.uniform(lim[0], lim[1]) for lim in joint_limits]
+
+            # 2. Find nearest in tree
+            q_near = min(tree.keys(),
+                        key=lambda q: sum((qi - ri)**2 for qi, ri in zip(q, q_rand)))
+
+            # 3. Steer from q_near toward q_rand
+            direction = [(r - n) for r, n in zip(q_rand, q_near)]
+            length = sum(d*d for d in direction)**0.5
+            q_new = [n + step * d/length for n, d in zip(q_near, direction)]
+
+            #TODO q_new is Nan
+
+            print("q_new: ", q_new)
+            # 4. Collision check along the segment
+            if not self.in_collision(env, q_new):
+                tree[tuple(q_new)] = q_near
+                # 5. Check for goal reach
+                if sum((n-g)**2 for n, g in zip(q_new, q_goal))**0.5 < step:
+                    tree[tuple(q_goal)] = tuple(q_new)
+                    return self.build_path(tree, q_start, q_goal)
+                
+        return None  # failed        
+
+    def build_path(self, tree, q_start, q_goal):
+        path = deque([tuple(q_goal)])
+        
+        while path[0] != tuple(q_start):
+            parent = tree[path[0]]
+            path.appendleft(parent)
+
+        return list(path)
+
 
 class TimeKeeper:
     def __init__(self, desired_freq=60):
@@ -503,44 +614,24 @@ if __name__ == "__main__":
         
         # get the initial pose of the left end effector
         left_ee_body_id = env.sim.model.body_name2id('robot0_left_end_effector')
-        left_ee_pos = data.xpos[left_ee_body_id]
+        p_wd_lee = env.sim.data.body_xpos[left_ee_body_id]
         R_wd_lee = env.sim.data.body_xmat[left_ee_body_id].reshape(3, 3)
+        # print("Left hand position:", p_wd_lee)
+        # print("Left hand rotation:\n", R_wd_lee)     
         
+        # get the initial pose of the ball
         ball_body_id = env.sim.model.body_name2id('sphere_main')
         p_wd_ball = env.sim.data.body_xpos[ball_body_id]
-        R_wd_ball = env.sim.data.body_xmat[ball_body_id].reshape(3, 3)
-
-        print("Ball position:", p_wd_ball)
-        print("Ball rotation:\n", R_wd_ball)
-
-        p_wd_lee = env.sim.data.body_xpos[left_ee_body_id]
+        # R_wd_ball = env.sim.data.body_xmat[ball_body_id].reshape(3, 3)
+        # print("Ball position:", p_wd_ball)
+        # print("Ball rotation:\n", R_wd_ball)
         
-        print("Bool: ", left_ee_pos == p_wd_lee)
-        
-        print("Left hand position:", p_wd_lee)
-        print("Left hand rotation:\n", R_wd_lee)
-        # sphere_center = data.xpos[env.sim.model.body_name2id('sphere_main')]
-        
-        # desired_joint = env._ik_left_arm(left_ee_pos, sphere_radius)
-        
-        # circle_radius = 0.1  # radius of the circle around the hand
-        # num_points = 16      # number of points in the circle        
-        
-        # desired_pos_list = [] # store transformation matrix        
-        
-        # for i in range(num_points):
-        #     angle = 2 * np.pi * i / num_points
-        #     # Create circle in the XY plane around the hand
-        #     x = p_wd_lee[0] + circle_radius * np.cos(angle)
-        #     y = p_wd_lee[1] + circle_radius * np.sin(angle)
-        #     z = p_wd_lee[2]  # keep same height as hand
-        #     desired_pos_list.append(np.array([x, y, z]))        
-        
+        # generate the waypoint pose matrices for the ball
         center = p_wd_ball
         radius = 0.15
         num_points = 12
         desired_list = env.generate_pose_matrices(center, radius, num_points)
-        print("Desired list: ", desired_list)
+        # print("Desired list: ", desired_list)
 
         current_action_index = 0
         last_action_time = 0
@@ -548,49 +639,106 @@ if __name__ == "__main__":
         target_reached_bool = False
         time_interval_start = False
 
-        lq0 = env.sim.data.qpos[env.robots[0]._ref_joint_pos_indexes[7:14]]
+        lq0 = env.sim.data.qpos[env.robots[0]._ref_joint_pos_indexes[7:14]] # get initial configuration of the left arm
 
-        desired_joint = env._ik_left_arm(left_ee_pos, R_wd_lee, lq0)
-        
+        desired_joint, s = env._ik_left_arm(p_wd_lee, R_wd_lee, lq0) # verify ik solver works (should run for 0 iterations)
+        q_start = desired_joint
+        # print("center:", center)
+        # print("R_hand:", R_wd_lee)
+
+        # gets configurations for each waypoint (first q0 is the initial configuration)
         desired_joints = []
-        # Generate desired poses vector
-        print("center:", center)
-        print("R_hand:", R_wd_lee)
+
         for i in range(len(desired_list)):            
             desired_pos = desired_list[i][:3, 3]
             desired_R = desired_list[i][:3, :3]
-            # print("Desired position:", desired_pos)
-            # print("Desired rotation:\n", desired_R)
-            print("desired_Transform:\n", desired_list[i])
+            # print("desired_Transform:\n", desired_list[i])
             
-            R_desired = np.eye(3) # R_wd_lee
-            R_desired = desired_R
-            desired_joint = env._ik_left_arm(desired_pos, R_desired, lq0)
-            lq0 = desired_joint
+            desired_joint, s = env._ik_left_arm(desired_pos, desired_R, lq0) # solve ik for left arm
+            lq0 = desired_joint # sets current configuration as the next iteration's initial configuration
             desired_joints.append(desired_joint)
 
-        desired_joints = [desired_joints[-1]]
-        
-        for i in range(len(desired_list) - 2, -1, -1):            
-            print("i: ", i)
-            desired_pos = desired_list[i][:3, 3]
-            desired_R = desired_list[i][:3, :3]
-            # print("Desired position:", desired_pos)
-            # print("Desired rotation:\n", desired_R)
-            print("desired_Transform:\n", desired_list[i])
-            
-            R_desired = np.eye(3) # R_wd_lee
-            R_desired = desired_R
-            desired_joint = env._ik_left_arm(desired_pos, R_desired, lq0)
-            lq0 = desired_joint
-            desired_joints.insert(0, desired_joint)
-    
-        print("Desired joint angles:")
-        for i, joint in enumerate(desired_joints):
-            print(f"Desired Rotation\n {i}: {desired_list[i][:3, :3]}")
-            print(f"Pose \n{i}: {joint}")
+        # RRT TESTING
+        q_goal = desired_joints[0]
+        path = env.rrt(env, q_start, q_goal)
 
-        desired_joint = desired_joints[0]
+        # gets configurations for each waypoint (first q0 is the last configuration)
+        desired_joints = [desired_joints[-1]] # initialize the last configuration as the desired joints list
+        desired_pos_list = [desired_pos] # initialize the last position as the desired position list
+        s_list = [s]
+        for i in range(len(desired_list) - 2, -1, -1):            
+            # print("i: ", i)
+            desired_pos = desired_list[i][:3, 3]
+            desired_pos_list.insert(0, desired_pos)
+            desired_R = desired_list[i][:3, :3]
+            # print("desired_Transform:\n", desired_list[i])
+            
+            desired_joint, s = env._ik_left_arm(desired_pos, desired_R, lq0) # solve ik for left arm
+            lq0 = desired_joint # sets current configuration as the next iteration's initial configuration
+            desired_joints.insert(0, desired_joint)
+            s_list.insert(0, s)
+
+        waypoints = range(len(desired_list)) # waypoint indices
+
+        # Create subplots for end effector positions
+
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 10))
+        
+        # Plot arm ee x position
+        ax1.plot(waypoints, [pos[0] for pos in desired_pos_list])
+        ax1.set_xlabel('Waypoint (i)')
+        ax1.set_ylabel('X Position (m)')
+        ax1.set_title('EE X Position over Time')
+        ax1.grid(True)
+
+        # Plot arm ee y position
+        ax2.plot(waypoints, [pos[1] for pos in desired_pos_list])
+        ax2.set_xlabel('Waypoint (i)')
+        ax2.set_ylabel('Y Position (m)')
+        ax2.set_title('EE Y Position over Time')
+        ax2.grid(True)
+
+        # Plot arm ee z position
+        ax3.plot(waypoints, [pos[2] for pos in desired_pos_list])
+        ax3.set_xlabel('Waypoint (i)')
+        ax3.set_ylabel('Z Position (m)')
+        ax3.set_title('EE Z Position over Time')
+        ax3.grid(True)
+        
+        plt.tight_layout()
+
+        # Create plots for joint angles
+        num_joints = len(desired_joints[0])
+
+        fig, axes = plt.subplots(num_joints, 1, figsize=(10, 10))
+        
+        for i in range(num_joints):
+            ax = axes[i]
+            ax.plot(waypoints, [joint[i] for joint in desired_joints])
+            ax.set_xlabel('Waypoint (i)')
+            ax.set_ylabel(f'Joint {i+1} Angle (rad)')
+            ax.set_title(f'Joint{i+1}')
+            ax.grid(True)
+        
+        plt.tight_layout()
+        
+        # fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 10))
+        fig, ax = plt.subplots(figsize=(10, 10))
+        
+        # Plot arm smallest Jacobian singular value
+        svd_J = np.array(s_list)
+        ax.plot(waypoints, np.min(svd_J, axis=1))
+        ax.set_xlabel('Waypoint (i)')
+        ax.set_ylabel('Smallest Jacobian Singular Value (s)')
+        ax.set_title('Jacobian')
+        ax.grid(True)
+
+        plt.tight_layout()
+
+        # show plots command
+        plt.show()
+
+        desired_joint = desired_joints[current_action_index]
 
         while viewer.is_running() and not env.done and data.time < simulation_time:
             if time_keeper.should_step():
@@ -613,13 +761,14 @@ if __name__ == "__main__":
                 # zeros_config = np.zeros(14)
                 # env_action = env._jog_robot_to_pose(zeros_config, desired_torso_height)
                 
-                # set last action time when the target is reached
+                # set last action time once the target is reached
                 if target_reached_bool and not time_interval_start:
                     print(f"Target reached at time {data.time:.2f}")
                     last_action_time = data.time
                     time_interval_start = True
 
-                if data.time - last_action_time >= action_interval:
+                # moves to the next waypoint once the next time interval is reached
+                if time_interval_start and data.time - last_action_time >= action_interval:
                     current_action_index = (current_action_index + 1) % len(desired_list)
                     
                     desired_joint = desired_joints[current_action_index]
@@ -630,7 +779,7 @@ if __name__ == "__main__":
                 
                 # Apply the current action
                 
-                # desired_joint = env._ik_left_arm(left_ee_pos, sphere_radius)
+                # desired_joint, s = env._ik_left_arm(left_ee_pos, sphere_radius)
                
                 # env_action = env._jog_robot_to_pose(desired_joint)
                 # env.step(env_action)

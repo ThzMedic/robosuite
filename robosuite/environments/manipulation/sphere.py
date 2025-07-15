@@ -149,7 +149,7 @@ class Sphere(ManipulationEnv):
                 name="ObjectSampler",
                 mujoco_objects=self.ball,
                 x_range=[-0.1124, -0.1124],
-                y_range=[0.3297, 0.3297],
+                y_range=[-0.3297, -0.3297],
                 rotation=None,
                 ensure_object_boundary_in_range=False,
                 ensure_valid_placement=True,
@@ -296,10 +296,23 @@ class Sphere(ManipulationEnv):
 
         return env_action, target_reached_bool
 
-    def _ik_left_arm(self, p_wd_target, R_wd_target, lq0):
+    def _ik_arm(self, p_wd_target, R_wd_target, q0, arm ="left"):
         """
-        Performs inverse kinematics for joint angles of the left arm to reach a target position and orientation.
+        Performs inverse kinematics for joint angles of the specified L/R arm to reach a target position and orientation.
         """
+
+
+        if arm not in ["left", "right"]:
+            raise ValueError("Invalid arm specified. Choose 'left' or 'right'.")
+        elif arm == "right":
+            base_body_name = 'robot0_right_arm_fixed_base_link'
+            ee_body_name = 'robot0_right_end_effector'
+            arm_joint_ids = slice(0, 7)
+        else:
+            base_body_name = 'robot0_left_arm_fixed_base_link'
+            ee_body_name = 'robot0_left_end_effector'
+            arm_joint_ids = slice(7, 14)
+
         # Compute the left-most point (assuming positive x is right)
         # p_target = sphere_center + np.array([-sphere_radius, 0, 0])
         # p_target = sphere_center
@@ -311,9 +324,9 @@ class Sphere(ManipulationEnv):
         #                     [-0., -1.,  0.]])
 
         # GET T_wd_base
-        lbase_id = self.sim.model.body_name2id('robot0_left_arm_fixed_base_link')
-        p_wd_lbase = self.sim.data.body_xpos[lbase_id]
-        R_wd_lbase = self.sim.data.body_xmat[lbase_id].reshape(3, 3)
+        base_id = self.sim.model.body_name2id(base_body_name)
+        p_wd_lbase = self.sim.data.body_xpos[base_id]
+        R_wd_lbase = self.sim.data.body_xmat[base_id].reshape(3, 3)
         # print("Left base position:", p_wd_lbase)
         # print("Left base rotation:\n", R_wd_lbase)
         T_wd_lbase = np.eye(4)
@@ -321,9 +334,9 @@ class Sphere(ManipulationEnv):
         T_wd_lbase[:3, 3] = p_wd_lbase
         
         # GET end effector position for testing
-        lhand_id = self.sim.model.body_name2id('robot0_left_end_effector')
-        R_wd_ee = self.sim.data.body_xmat[lhand_id].reshape(3, 3)
-        p_wd_ee = data.xpos[lhand_id]
+        hand_id = self.sim.model.body_name2id(ee_body_name)
+        R_wd_ee = self.sim.data.body_xmat[hand_id].reshape(3, 3)
+        p_wd_ee = data.xpos[hand_id]
 
         # R_wd_target = R_wd_ee # alternative R_wd_ee for testing
         # p_wd_target = p_wd_ee # alternative p_wd_ee for testing
@@ -344,20 +357,20 @@ class Sphere(ManipulationEnv):
         # lq0 = self.sim.data.qpos[self.robots[0]._ref_joint_pos_indexes[7:14]]
 
         # Name of the left end-effector frame
-        left_ee = "end_effector"
+        ee_frame = "end_effector"
 
         # Compute the inverse kinematics solution using Pinnocchio
-        q_sol, J = compute_ik(urdf_path, left_ee, T_lbase_target, lq0)
-        # print("initial qpos:", lq0)
+        q_sol, J = compute_ik(urdf_path, ee_frame, T_lbase_target, q0)
+        # print("initial qpos:", q0)
         # print("IK solution:", q_sol)
-        # print("", q_sol == lq0)
+        # print("", q_sol == q0)
 
         # Jacobian SVD Calc
         _, s, _ = np.linalg.svd(J)
 
         # Set left arm joints angles which are indexed from 7 to 14.
         desired_arm_pos = self.robots[0].init_qpos.copy()
-        desired_arm_pos[7:14] = q_sol
+        desired_arm_pos[arm_joint_ids] = q_sol
         
         return desired_arm_pos, s
     
@@ -629,19 +642,21 @@ if __name__ == "__main__":
         # generate the waypoint pose matrices for the ball
         center = p_wd_ball
         radius = 0.15
-        num_points = 12
+        num_points = 36
         desired_list = env.generate_pose_matrices(center, radius, num_points)
         # print("Desired list: ", desired_list)
 
+        action_interval = 0.5  # Change action every n seconds
+
+        # Initialized variables for the loop
         current_action_index = 0
         last_action_time = 0
-        action_interval = 1.0  # Change action every n seconds
         target_reached_bool = False
         time_interval_start = False
 
         lq0 = env.sim.data.qpos[env.robots[0]._ref_joint_pos_indexes[7:14]] # get initial configuration of the left arm
 
-        desired_joint, s = env._ik_left_arm(p_wd_lee, R_wd_lee, lq0) # verify ik solver works (should run for 0 iterations)
+        desired_joint, s = env._ik_arm(p_wd_lee, R_wd_lee, lq0) # verify ik solver works (should run for 0 iterations)
         q_start = desired_joint
         # print("center:", center)
         # print("R_hand:", R_wd_lee)
@@ -649,18 +664,30 @@ if __name__ == "__main__":
         # gets configurations for each waypoint (first q0 is the initial configuration)
         desired_joints = []
 
+        # SET SET ARM LEFT/RIGHT HERE
+        arm_side = "right"  # or "right" depending on which arm you want to control
+        if arm_side == "right":
+            # base_body_name = 'robot0_right_arm_fixed_base_link'
+            # ee_body_name = 'robot0_right_end_effector'
+            arm_joint_ids = slice(0, 7)
+        else:
+            # base_body_name = 'robot0_left_arm_fixed_base_link'
+            # ee_body_name = 'robot0_left_end_effector'
+            arm_joint_ids = slice(7, 14) 
+
+        q0 = env.sim.data.qpos[env.robots[0]._ref_joint_pos_indexes[arm_joint_ids]]  # initial configuration of the specified arm
         for i in range(len(desired_list)):            
             desired_pos = desired_list[i][:3, 3]
             desired_R = desired_list[i][:3, :3]
             # print("desired_Transform:\n", desired_list[i])
             
-            desired_joint, s = env._ik_left_arm(desired_pos, desired_R, lq0) # solve ik for left arm
-            lq0 = desired_joint # sets current configuration as the next iteration's initial configuration
+            desired_joint, s = env._ik_arm(desired_pos, desired_R, q0, arm_side) # solve ik for the specified arm
+            q0 = desired_joint # sets current configuration as the next iteration's initial configuration
             desired_joints.append(desired_joint)
 
-        # RRT TESTING
-        q_goal = desired_joints[0]
-        path = env.rrt(env, q_start, q_goal)
+        # # RRT TESTING
+        # q_goal = desired_joints[0]
+        # path = env.rrt(env, q_start, q_goal)
 
         # gets configurations for each waypoint (first q0 is the last configuration)
         desired_joints = [desired_joints[-1]] # initialize the last configuration as the desired joints list
@@ -673,70 +700,70 @@ if __name__ == "__main__":
             desired_R = desired_list[i][:3, :3]
             # print("desired_Transform:\n", desired_list[i])
             
-            desired_joint, s = env._ik_left_arm(desired_pos, desired_R, lq0) # solve ik for left arm
-            lq0 = desired_joint # sets current configuration as the next iteration's initial configuration
+            desired_joint, s = env._ik_arm(desired_pos, desired_R, q0, arm_side) # solve ik for left arm
+            q0 = desired_joint # sets current configuration as the next iteration's initial configuration
             desired_joints.insert(0, desired_joint)
             s_list.insert(0, s)
 
         waypoints = range(len(desired_list)) # waypoint indices
 
-        # Create subplots for end effector positions
+        # # Create subplots for end effector positions
 
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 10))
-        
-        # Plot arm ee x position
-        ax1.plot(waypoints, [pos[0] for pos in desired_pos_list])
-        ax1.set_xlabel('Waypoint (i)')
-        ax1.set_ylabel('X Position (m)')
-        ax1.set_title('EE X Position over Time')
-        ax1.grid(True)
-
-        # Plot arm ee y position
-        ax2.plot(waypoints, [pos[1] for pos in desired_pos_list])
-        ax2.set_xlabel('Waypoint (i)')
-        ax2.set_ylabel('Y Position (m)')
-        ax2.set_title('EE Y Position over Time')
-        ax2.grid(True)
-
-        # Plot arm ee z position
-        ax3.plot(waypoints, [pos[2] for pos in desired_pos_list])
-        ax3.set_xlabel('Waypoint (i)')
-        ax3.set_ylabel('Z Position (m)')
-        ax3.set_title('EE Z Position over Time')
-        ax3.grid(True)
-        
-        plt.tight_layout()
-
-        # Create plots for joint angles
-        num_joints = len(desired_joints[0])
-
-        fig, axes = plt.subplots(num_joints, 1, figsize=(10, 10))
-        
-        for i in range(num_joints):
-            ax = axes[i]
-            ax.plot(waypoints, [joint[i] for joint in desired_joints])
-            ax.set_xlabel('Waypoint (i)')
-            ax.set_ylabel(f'Joint {i+1} Angle (rad)')
-            ax.set_title(f'Joint{i+1}')
-            ax.grid(True)
-        
-        plt.tight_layout()
-        
         # fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 10))
-        fig, ax = plt.subplots(figsize=(10, 10))
         
-        # Plot arm smallest Jacobian singular value
-        svd_J = np.array(s_list)
-        ax.plot(waypoints, np.min(svd_J, axis=1))
-        ax.set_xlabel('Waypoint (i)')
-        ax.set_ylabel('Smallest Jacobian Singular Value (s)')
-        ax.set_title('Jacobian')
-        ax.grid(True)
+        # # Plot arm ee x position
+        # ax1.plot(waypoints, [pos[0] for pos in desired_pos_list])
+        # ax1.set_xlabel('Waypoint (i)')
+        # ax1.set_ylabel('X Position (m)')
+        # ax1.set_title('EE X Position over Time')
+        # ax1.grid(True)
 
-        plt.tight_layout()
+        # # Plot arm ee y position
+        # ax2.plot(waypoints, [pos[1] for pos in desired_pos_list])
+        # ax2.set_xlabel('Waypoint (i)')
+        # ax2.set_ylabel('Y Position (m)')
+        # ax2.set_title('EE Y Position over Time')
+        # ax2.grid(True)
 
-        # show plots command
-        plt.show()
+        # # Plot arm ee z position
+        # ax3.plot(waypoints, [pos[2] for pos in desired_pos_list])
+        # ax3.set_xlabel('Waypoint (i)')
+        # ax3.set_ylabel('Z Position (m)')
+        # ax3.set_title('EE Z Position over Time')
+        # ax3.grid(True)
+        
+        # plt.tight_layout()
+
+        # # Create plots for joint angles
+        # num_joints = len(desired_joints[0])
+
+        # fig, axes = plt.subplots(num_joints, 1, figsize=(10, 10))
+        
+        # for i in range(num_joints):
+        #     ax = axes[i]
+        #     ax.plot(waypoints, [joint[i] for joint in desired_joints])
+        #     ax.set_xlabel('Waypoint (i)')
+        #     ax.set_ylabel(f'Joint {i+1} Angle (rad)')
+        #     ax.set_title(f'Joint{i+1}')
+        #     ax.grid(True)
+        
+        # plt.tight_layout()
+        
+        # # fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 10))
+        # fig, ax = plt.subplots(figsize=(10, 10))
+        
+        # # Plot arm smallest Jacobian singular value
+        # svd_J = np.array(s_list)
+        # ax.plot(waypoints, np.min(svd_J, axis=1))
+        # ax.set_xlabel('Waypoint (i)')
+        # ax.set_ylabel('Smallest Jacobian Singular Value (s)')
+        # ax.set_title('Jacobian')
+        # ax.grid(True)
+
+        # plt.tight_layout()
+
+        # # show plots command
+        # plt.show(block=False)  # Don't block execution
 
         desired_joint = desired_joints[current_action_index]
 
@@ -779,11 +806,10 @@ if __name__ == "__main__":
                 
                 # Apply the current action
                 
-                # desired_joint, s = env._ik_left_arm(left_ee_pos, sphere_radius)
+                # desired_joint, s = env._ik_arm(left_ee_pos, sphere_radius)
                
                 # env_action = env._jog_robot_to_pose(desired_joint)
                 # env.step(env_action)
-
                 env_action, target_reached_bool = env._jog_robot_to_pose(desired_joint)
                 # env_action = np.zeros_like(env_action)
                 env.step(env_action)

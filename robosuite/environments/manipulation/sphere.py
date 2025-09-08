@@ -765,6 +765,7 @@ if __name__ == "__main__":
         # # show plots command
         # plt.show(block=False)  # Don't block execution
 
+        # initialize the first desired joint configuration
         desired_joint = desired_joints[current_action_index]
 
         while viewer.is_running() and not env.done and data.time < simulation_time:
